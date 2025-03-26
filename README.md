@@ -4,7 +4,7 @@ Automate the deployment of a Red Team infrastructure with Terraform and Ansible.
 
 ## Features
 - **Havoc C2**: Command and control server in a tmux session.
-- **C2 Redirector**: Apache with SSL (Certbot) and mod_rewrite to route traffic with a 'ThisIsNotC2' (case-insensitive) User-Agent to an internal C2 server, while directing all other traffic to Google.
+- **C2 Redirector**: Apache with SSL (Certbot) and mod_rewrite to route traffic with a 'ThisIsNotC2' (case-insensitive) User-Agent to Havoc C2 server internally, while directing all other traffic to Google.
 - **Evilginx2**: Phishing server with dynamic domain and IP configuration.
 - **Gophish**: Email phishing framework.
 
