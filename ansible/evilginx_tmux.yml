@@ -1,0 +1,106 @@
+---
+- name: Install and Setup Evilginx2
+  hosts: evilginx
+  become: true
+  vars:
+    go_version: "1.24.0"
+    evilginx_repo: "https://github.com/kgretzky/evilginx2.git"
+    evilginx_dir: "/opt/evilginx2"
+    tmux_session: "evilginx"
+    domain: "evilginxdomain.com"
+
+  tasks:
+    - name: Wait for DPG lock to be released
+      wait_for:
+        path: /var/lock/dpg.lock
+        state: absent
+        delay: 30
+        timeout: 600
+      register: lock_wait_result
+
+    - name: Update APT package cache and upgrade packages
+      apt:
+        update_cache: yes
+        upgrade: safe
+
+    - name: Install required packages
+      apt:
+        name:
+          - tmux
+          - wget
+          - git
+          - build-essential
+        state: present
+
+    - name: Download and Install Go {{ go_version }}
+      get_url:
+        url: "https://go.dev/dl/go{{ go_version }}.linux-amd64.tar.gz"
+        dest: "/tmp/go{{ go_version }}.linux-amd64.tar.gz"
+
+    - name: Install Go {{ go_version }}
+      unarchive:
+        src: "/tmp/go{{ go_version }}.linux-amd64.tar.gz"
+        dest: "/usr/local"
+        remote_src: yes
+
+    - name: Remove Go tarball
+      file:
+        path: "/tmp/go{{ go_version }}.linux-amd64.tar.gz"
+        state: absent
+
+    - name: Set Go binary path at the beginning of PATH
+      lineinfile:
+        path: "/etc/profile"
+        line: 'export PATH=/usr/local/go/bin:$PATH'
+        create: yes
+
+    - name: Create Evilginx2 directory
+      file:
+        path: "{{ evilginx_dir }}"
+        state: directory
+
+    - name: Clone Evilginx2 repository
+      git:
+        repo: "{{ evilginx_repo }}"
+        dest: "{{ evilginx_dir }}"
+        version: master
+
+    - name: Create tmux session for Evilginx2
+      shell: |
+        tmux new-session -d -s {{ tmux_session }} || true
+      args:
+        warn: false
+
+    - name: Build Evilginx2 inside tmux session
+      shell: |
+        tmux send-keys -t {{ tmux_session }} "cd {{ evilginx_dir }} && go build" C-m
+      args:
+        warn: false
+
+    - name: Wait for 60 seconds before continuing
+      pause:
+        seconds: 60
+
+    - name: Run Evilginx2 inside tmux session
+      shell: |
+        tmux send-keys -t {{ tmux_session }} "cd {{ evilginx_dir }} && ./evilginx2" C-m
+      args:
+        warn: false
+
+    - name: Fetch public IP address from eth0 (excluding private ranges)
+      shell: |
+        ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | grep -vE '^(10|172\.1[6-9]|172\.2[0-9]|172\.3[0-1]|192\.168)\.'
+      register: public_ip_result
+      changed_when: false
+
+    - name: Fail if no public IP is found
+      fail:
+        msg: "Could not fetch a public IP from eth0"
+      when: public_ip_result.stdout == ""
+
+    - name: Configure Evilginx2 with fetched IP and domain
+      shell: |
+        tmux send-keys -t {{ tmux_session }} "config ipv4 {{ public_ip_result.stdout }}" C-m
+        tmux send-keys -t {{ tmux_session }} "config domain {{ domain }}" C-m
+      args:
+        warn: false

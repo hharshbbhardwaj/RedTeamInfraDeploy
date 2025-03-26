@@ -1,0 +1,134 @@
+---
+- name: Set up Havoc C2 Server
+  hosts: c2_havoc
+  become: true
+  vars:
+    havoc_repo: "https://github.com/HavocFramework/Havoc.git"
+    havoc_dir: "/opt/Havoc"
+    teamserver_dir: "/opt/Havoc/teamserver"
+    python_version: "3.10"
+    go_version: "1.24.0"
+    c2_interface: "eth1"  
+
+  tasks:
+    - name: Ensure the target interface exists and has an IP
+      ansible.builtin.fail:
+        msg: "Interface {{ c2_interface }} not found or has no IPv4 address"
+      when: ansible_facts[c2_interface].ipv4.address is not defined
+
+    - name: Set c2_internal_ip to Havoc's internal IP
+      ansible.builtin.set_fact:
+        c2_internal_ip: "{{ ansible_facts[c2_interface].ipv4.address }}"
+      run_once: true
+
+    - name: Debug the extracted IP
+      ansible.builtin.debug:
+        var: c2_internal_ip
+
+    - name: Update C2_INTERNAL_IP in variables.env on control node
+      ansible.builtin.lineinfile:
+        path: "{{ playbook_dir }}/../variables.env"
+        regexp: '^export C2_INTERNAL_IP=.*'
+        line: "export C2_INTERNAL_IP=\"{{ c2_internal_ip }}\""
+      delegate_to: localhost
+      become: false
+
+    - name: Wait for DPG lock to be released
+      wait_for:
+        path: /var/lock/dpg.lock
+        state: absent
+        delay: 15
+        timeout: 600
+      register: lock_wait_result
+
+    - name: Update APT package cache and upgrade packages
+      apt:
+        update_cache: yes
+        upgrade: safe
+
+    - name: Install required packages
+      apt:
+        name:
+          - make
+          - python3.10
+          - python3.10-dev
+        state: present
+
+    - name: Download and Install Go {{ go_version }}
+      get_url:
+        url: "https://go.dev/dl/go{{ go_version }}.linux-amd64.tar.gz"
+        dest: "/tmp/go{{ go_version }}.linux-amd64.tar.gz"
+
+    - name: Install Go {{ go_version }}
+      unarchive:
+        src: "/tmp/go{{ go_version }}.linux-amd64.tar.gz"
+        dest: "/usr/local"
+        remote_src: yes
+
+    - name: Remove Go tarball
+      file:
+        path: "/tmp/go{{ go_version }}.linux-amd64.tar.gz"
+        state: absent
+
+    - name: Set Go binary path at the beginning of PATH
+      lineinfile:
+        path: "/etc/profile"
+        line: 'export PATH=/usr/local/go/bin:$PATH'
+        create: yes
+
+    - name: Add deadsnakes PPA for Python 3.10
+      apt_repository:
+        repo: ppa:deadsnakes/ppa
+        state: present
+
+    - name: Update apt cache after adding new PPA
+      apt:
+        update_cache: yes
+
+    - name: Clone Havoc repository
+      git:
+        repo: "{{ havoc_repo }}"
+        dest: "{{ havoc_dir }}"
+        version: main
+
+    - name: Create tmux session for Havoc C2
+      shell: |
+        tmux new-session -d -s havoc_server
+      args:
+        creates: /tmp/havoc_tmux_started
+
+    - name: Install Go dependencies inside tmux session
+      shell: |
+        tmux send-keys -t havoc_server "cd {{ havoc_dir }}/teamserver" C-m
+        tmux send-keys -t havoc_server "/usr/local/go/bin/go mod download golang.org/x/sys" C-m
+        tmux send-keys -t havoc_server "/usr/local/go/bin/go mod download github.com/ugorji/go" C-m
+      args:
+        creates: /tmp/havoc_tmux_started
+
+    - name: Build teamserver inside tmux session
+      shell: |
+        tmux send-keys -t havoc_server "cd {{ havoc_dir }}" C-m
+        tmux send-keys -t havoc_server "make ts-build" C-m
+      args:
+        creates: /tmp/havoc_tmux_started
+
+    - name: Wait for the havoc binary to be created
+      wait_for:
+        path: "{{ havoc_dir }}/havoc"
+        state: present
+        delay: 90
+        timeout: 900
+
+    - name: Run Havoc C2 binary in tmux session
+      shell: |
+        tmux send-keys -t havoc_server "cd {{ havoc_dir }}" C-m
+        tmux send-keys -t havoc_server "./havoc server --profile ./profiles/havoc.yaotl -v --debug | tee -a /var/log/havoc.log" C-m
+
+    - name: Create a flag to prevent running the tmux session multiple times
+      file:
+        path: /tmp/havoc_tmux_started
+        state: touch
+
+    - name: Notify user of successful setup
+      debug:
+        msg: "Havoc C2 server is now running in tmux session."

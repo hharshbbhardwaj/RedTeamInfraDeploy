@@ -1,0 +1,93 @@
+---
+- name: Install and Setup GoPhish inside tmux session
+  hosts: gophish
+  become: true
+  vars:
+    gophish_version: "v0.12.1"
+    gophish_download_url: "https://github.com/gophish/gophish/releases/download/{{ gophish_version }}/gophish-{{ gophish_version }}-linux-64bit.zip"
+    gophish_dir: "/opt/gophish"              
+    gophish_log: "/opt/gophish/gophish.log"  
+
+  tasks:
+    - name: Wait for DPG lock to be released
+      wait_for:
+        path: /var/lock/dpg.lock
+        state: absent     
+        delay: 30         
+        timeout: 600      
+      register: lock_wait_result
+
+    - name: Update APT package cache
+      apt:
+        update_cache: yes
+
+    - name: Upgrade APT to the latest packages
+      apt:
+        upgrade: safe
+
+    - name: Install tmux
+      apt:
+        name: tmux
+        state: present
+        update_cache: yes
+
+    - name: Install unzip
+      apt:
+        name: unzip
+        state: present
+
+    - name: Create GoPhish directory
+      file:
+        path: "{{ gophish_dir }}"
+        state: directory
+
+    - name: Download GoPhish
+      get_url:
+        url: "{{ gophish_download_url }}"
+        dest: "/tmp/gophish.zip"
+
+    - name: Unzip GoPhish
+      unarchive:
+        src: "/tmp/gophish.zip"
+        dest: "{{ gophish_dir }}"
+        remote_src: yes
+
+    - name: Remove GoPhish zip file
+      file:
+        path: "/tmp/gophish.zip"
+        state: absent
+
+    - name: Set permissions for GoPhish
+      file:
+        path: "{{ gophish_dir }}/gophish"
+        mode: '0755'
+
+    - name: Update GoPhish config.json to allow external access
+      shell: |
+        sed -i 's/"listen_url": "127.0.0.1:3333"/"listen_url": "0.0.0.0:3333"/' {{ gophish_dir }}/config.json
+        sed -i 's/"listen_url": "0.0.0.0:80"/"listen_url": "127.0.0.1:80"/' {{ gophish_dir }}/config.json
+
+    - name: Create tmux session for GoPhish
+      shell: |
+        tmux new-session -d -s gophish
+      args:
+        creates: /tmp/gophish_tmux_started
+
+    - name: Run GoPhish inside tmux session
+      shell: |
+        tmux send-keys -t gophish "cd {{ gophish_dir }}" C-m
+        tmux send-keys -t gophish "./gophish > {{ gophish_log }} 2>&1 &" C-m
+      args:
+        warn: false
+
+    - name: Wait for Gophish to initialize
+      wait_for:
+        path: "{{ gophish_log }}"
+        search_regex: "Please login with the username admin and the password"
+        delay: 5
+        timeout: 60
+
+    - name: Create a flag to prevent running the tmux session multiple times
+      file:
+        path: /tmp/gophish_tmux_started
+        state: touch
